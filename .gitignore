@@ -1,12 +1,35 @@
-Packages
-.build
-xcuserdata
-*.xcodeproj
-DerivedData/
+# Xcode
 .DS_Store
-db.sqlite
-.swiftpm
+*.xcworkspace
+xcuserdata/
+*.xcuserdatad/
+DerivedData/
+
+# Code Coverage & Profiling
+*.profraw
+*.profdata
+*.coverage
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+.swiftpm/
+
+# Environment & Sensitive Keys
 .env
 .env.*
-!.env.example
-default.profraw
+/certs/
+/ssl/
+*.pem
+*.key
+*.crt
+*.csr
+*.srl
+*.dump
+*.sql.gz
+*.sql.dump
+
+# Storage & Uploads
+/Storage/
+/users/

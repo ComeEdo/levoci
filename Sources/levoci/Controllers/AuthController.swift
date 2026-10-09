@@ -1,0 +1,152 @@
+import Vapor
+import Fluent
+import FluentKit
+
+/// Controller per la gestione dell'autenticazione e delle credenziali
+struct AuthController: RouteCollection {
+    func boot(routes: any RoutesBuilder) throws {
+        // Registrazione e verifica
+        routes.post("register", use: register)
+        routes.get("verifyEmail", ":token", use: verifyEmail)
+        routes.post("checkUsername", use: checkUsername)
+
+        // Login
+        routes.post("login", use: login)
+
+        // Rotte protette da AuthToken
+        let authProtected = routes.grouped("auth").grouped(AuthTokenMiddleware())
+        authProtected.get("isAuthTokenValid", use: isAuthTokenValid)
+        authProtected.post("getTokenAndUser", use: getTokenAndUser)
+        authProtected.post("refreshAuthToken", use: refreshAuthToken)
+        authProtected.post("logoutAll", use: logoutAll)
+    }
+    
+    @Sendable
+    func register(req: Request) async throws -> Response {
+        let body = try req.validatedBody(RegisterRequest.self)
+
+        let role = body.email.role
+
+        let validClassId: UUID?
+        if role == .student {
+            guard let classId = body.classId else {
+                throw APIError.badRequest("For a student, the class is required")
+            }
+            guard try await SchoolClass.find(classId, on: req.db) != nil else {
+                throw APIError.badRequest("Class UUID does not exist")
+            }
+            validClassId = classId
+        } else {
+            validClassId = nil
+        }
+
+        async let emailExists = Credentials.query(on: req.db).filter(\.$email == body.email.value).first() != nil
+        async let usernameExists = User.query(on: req.db).filter(\.$username == body.username.value).first() != nil
+
+        let (emailTaken, usernameTaken) = try await (emailExists, usernameExists)
+
+        if emailTaken && usernameTaken {
+            throw APIError.conflict("Username and email already exist")
+        } else if emailTaken {
+            throw APIError.conflict("Email already exists")
+        } else if usernameTaken {
+            throw APIError.conflict("Username already exists")
+        }
+
+        let passwordHash = try await body.password.hashed(on: req)
+
+        let credentials: Credentials
+        let user: User
+        do {
+            (credentials, user) = try await req.db.transaction { db -> (Credentials, User) in
+                let credentials = Credentials(
+                    email: body.email,
+                    passwordHash: passwordHash
+                )
+                try await credentials.save(on: db)
+                let credId = try credentials.requireID()
+
+                let user = User(
+                    name: body.name,
+                    surname: body.surname,
+                    username: body.username,
+                    role: role,
+                    classId: validClassId,
+                    credentialsId: credId
+                )
+                try await user.save(on: db)
+
+                return (credentials, user)
+            }
+        } catch let error as any DatabaseError where error.isConstraintFailure {
+            // Race: un'altra richiesta ha registrato gli stessi dati dopo il controllo preliminare.
+            // I vincoli UNIQUE su email e username garantiscono l'integrità; qui si risponde 409 invece di 500.
+            throw APIError.conflict("Username or email already exists")
+        }
+
+        let userId = try user.requireID()
+
+        let userDir = URL(fileURLWithPath: req.application.directory.workingDirectory).appendingPathComponent("users").appendingPathComponent(userId.uuidString)
+        try? FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
+
+        do {
+            try await credentials.sendVerificationEmailIfNeeded(req: req)
+        } catch {
+            req.logger.error("Impossibile inviare email di verifica a \(userId): \(error)")
+        }
+
+        req.logger.info("Registrazione completata con successo per userId: \(userId)")
+
+        let response = RegisterResponse(username: user.username)
+        return try await response.encodeResponse(status: .created, for: req)
+    }
+
+    @Sendable
+    func verifyEmail(req: Request) async throws -> Response {
+        // TODO: Implementare verifica email tramite token
+        throw Abort(.notImplemented)
+    }
+
+    @Sendable
+    func checkUsername(req: Request) async throws -> Response {
+        // TODO: Implementare verifica disponibilità username
+        throw Abort(.notImplemented)
+    }
+
+    @Sendable
+    func login(req: Request) async throws -> Response {
+        // TODO: Implementare verifica credenziali e generazione AuthToken
+        throw Abort(.notImplemented)
+    }
+
+    @Sendable
+    func isAuthTokenValid(req: Request) async throws -> HTTPStatus {
+        let credentialId = try req.auth.require(Credentials.self).requireID()
+        req.logger.notice("Auth token verificato con successo per credentialsId: \(credentialId)")
+        return .noContent
+    }
+
+    @Sendable
+    func getTokenAndUser(req: Request) async throws -> Response {
+        // TODO: Implementare rilascio UserToken per lo specifico profilo selezionato
+        throw Abort(.notImplemented)
+    }
+
+    @Sendable
+    func refreshAuthToken(req: Request) async throws -> Response {
+        // TODO: Implementare refresh dell'AuthToken
+        throw Abort(.notImplemented)
+    }
+
+    @Sendable
+    func logoutAll(req: Request) async throws -> HTTPStatus {
+        let credentials = try req.auth.require(Credentials.self)
+        let credentialsId = try credentials.requireID()
+
+        try await credentials.invalidateAllSessions(on: req.db)
+
+        req.logger.info("Logout da tutti i dispositivi completato per credentialsId: \(credentialsId)")
+
+        return .noContent
+    }
+}
