@@ -7,14 +7,10 @@ import Foundation
 struct ArchitectureRulesTests {
 
     /// REGOLA: i controller non leggono mai l'input del client in modo grezzo.
-    /// Per il body si usa `req.validatedBody(MioDTO.self)` (vedi `Validation/ValidatableRequest.swift`).
-    /// Se ti serve leggere i query param, aggiungi prima un `validatedQuery` equivalente, poi usalo.
+    /// Per il body si usa `req.validatedBody(MioDTO.self)` e per le query string `req.validatedQuery(MioDTO.self)` (vedi `Validation/Validatable.swift`).
     @Test("I controller leggono l'input solo tramite i tipi validati")
     func controllersDoNotReadRawInput() throws {
-        let projectDir = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // levociTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // root progetto
+        let projectDir = try TestProjectPaths.root(from: #filePath)
         let controllersDir = projectDir.appendingPathComponent("Sources/levoci/Controllers")
 
         let files = try FileManager.default

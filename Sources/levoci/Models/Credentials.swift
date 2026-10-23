@@ -57,9 +57,20 @@ extension Credentials {
         let shouldSend = self.lastUpdated.map { $0 < fiveMinutesAgo } ?? true
 
         if shouldSend {
-            try await emailService.sendVerificationEmail(to: self.email, credentialsId: self.requireID(), username: username)
             self.lastUpdated = Date()
             try await self.save(on: db)
+
+            let credId = try self.requireID()
+            let userEmail = self.email
+            let version = self.tokenVersion
+
+            Task {
+                do {
+                    try await emailService.sendVerificationEmail(to: userEmail, credentialsId: credId, tokenVersion: version, username: username)
+                } catch {
+                    logger?.error("Impossibile inviare email di verifica per credentialsId \(credId): \(error)")
+                }
+            }
         }
     }
 

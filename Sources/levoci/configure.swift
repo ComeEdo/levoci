@@ -51,7 +51,13 @@ func configure(_ app: Application) async throws {
     
     app.databases.use(DatabaseConfigurationFactory.mysql(configuration: DBConfig, maxConnectionsPerEventLoop: DATABASE_POOL_LIMIT), as: .mysql)
 
-    try await configureJWT(app: app)
+    let rawPrivateKeyPath = try requireEnv("JWT_PRIVATE_KEY_PATH")
+    let rawPublicKeyPath = try requireEnv("JWT_PUBLIC_KEY_PATH")
+    try await configureJWT(app: app, privateKeyPath: rawPrivateKeyPath, publicKeyPath: rawPublicKeyPath)
+    
+    // URL pubblico: usato per i link delle email e per decidere `Secure` sui cookie (vedi `HTTPURL.isSecure`)
+    app.publicBaseURL = try resolvePublicBaseURL(for: app)
+    
     try configureSmtp(app: app)
 
     app.middleware.use(CustomErrorMiddleware())
@@ -61,15 +67,15 @@ func configure(_ app: Application) async throws {
     app.migrations.add(CreateUsers())
     app.migrations.add(CreatePostsAndVotes())
 
-    //app.views.use(.leaf) ancora no
+    app.views.use(.leaf)
 
     try routes(app)
 }
 
 /// Errori di configurazione dell'applicazione e delle variabili d'ambiente
-enum ConfigurationError: Error, LocalizedError {
+enum ConfigurationError: Error, LocalizedError, Equatable {
     case missingEnvironmentVariable(name: String)
-    case invalidEnvironmentVariable(name: String, value: String)
+    case invalidEnvironmentVariable(name: String, value: String, reason: String? = nil)
     case missingKeyFile(name: String, path: String)
     case invalidKeyFile(name: String, reason: String)
 
@@ -77,8 +83,13 @@ enum ConfigurationError: Error, LocalizedError {
         switch self {
         case .missingEnvironmentVariable(let name):
             return "Variabile d'ambiente mancante o vuota nel file .env: \(name)"
-        case .invalidEnvironmentVariable(let name, let value):
-            return "Valore non valido per la variabile d'ambiente \(name): '\(value)'"
+        case .invalidEnvironmentVariable(let name, let value, let reason):
+            let base: LocalizedStringResource = "Valore non valido per la variabile d'ambiente \(name): '\(value)'"
+            if let reason {
+                return "\(base). \(reason)"
+            } else {
+                return base
+            }
         case .missingKeyFile(let name, let path):
             return "File di chiave asimmetrica mancante per \(name) al percorso: \(path)"
         case .invalidKeyFile(let name, let reason):
@@ -117,10 +128,7 @@ private func resolvePath(_ rawPath: String, rootDirectory: String) -> String {
 /// Configura le chiavi asimmetriche RSA (RS256) per JWT e registra il TokenService.
 /// Verifica obbligatoriamente la presenza delle variabili d'ambiente e l'esistenza fisica
 /// dei file contenenti la chiave privata e pubblica.
-private func configureJWT(app: Application) async throws {
-    let rawPrivateKeyPath = try requireEnv("JWT_PRIVATE_KEY_PATH")
-    let rawPublicKeyPath = try requireEnv("JWT_PUBLIC_KEY_PATH")
-
+func configureJWT(app: Application, privateKeyPath rawPrivateKeyPath: String, publicKeyPath rawPublicKeyPath: String) async throws {
     let rootDir = app.directory.workingDirectory
     let privateKeyPath = resolvePath(rawPrivateKeyPath, rootDirectory: rootDir)
     let publicKeyPath = resolvePath(rawPublicKeyPath, rootDirectory: rootDir)
@@ -198,12 +206,80 @@ private func configureSmtp(app: Application) throws {
 
     let SMTP_HOST = Environment.get("SMTP_HOST") ?? "smtp.gmail.com"
     let SMTP_PORT = Environment.get("SMTP_PORT").flatMap(Int.init) ?? 587
+    let SMTP_FROM_NAME = Environment.get("SMTP_FROM_NAME") ?? "Levoci"
 
     app.smtp.configuration.hostname = SMTP_HOST
     app.smtp.configuration.port = SMTP_PORT
     app.smtp.configuration.signInMethod = .credentials(username: SMTP_USERNAME, password: SMTP_PASSWORD)
     app.smtp.configuration.secure = .startTls
 
-    app.emailService = EmailService(app: app)
+    app.emailService = EmailService(
+        app: app,
+        fromAddress: SMTP_USERNAME,
+        fromName: SMTP_FROM_NAME
+    )
     app.logger.notice("[SMTP] Client configurato ed EmailService registrato")
+}
+
+/// URL pubblico del server (quello che vedono gli utenti, cioè Apache), usato nei link delle email
+/// e per decidere `Secure` sui cookie (`HTTPURL.isSecure`).
+/// Dietro Apache l'app ascolta su 127.0.0.1:8080, quindi l'indirizzo di bind non si può usare nei link.
+/// In produzione imposta sempre `PUBLIC_BASE_URL` con uno schema `https` (es. `https://dominio`): se manca o non è
+/// `https`, in `.production` l'app non parte. Negli altri ambienti, se manca, si usa l'indirizzo di bind
+/// (solo per sviluppo, con un warning).
+func resolvePublicBaseURL(for app: Application, rawValue: String? = Environment.get("PUBLIC_BASE_URL")) throws -> HTTPURL {
+    guard let rawValue, !rawValue.isEmpty else {
+        if app.environment == .production {
+            throw ConfigurationError.missingEnvironmentVariable(name: "PUBLIC_BASE_URL")
+        }
+        let fallback = "http://\(app.http.server.configuration.hostname):\(app.http.server.configuration.port)"
+        app.logger.warning("[Email] PUBLIC_BASE_URL non impostata: i link delle email usano \(fallback) (solo sviluppo)")
+        return try HTTPURL(raw: fallback)
+    }
+
+    let baseURL: HTTPURL
+    do {
+        baseURL = try HTTPURL(raw: rawValue)
+    } catch {
+        throw ConfigurationError.invalidEnvironmentVariable(
+            name: "PUBLIC_BASE_URL",
+            value: rawValue,
+            reason: "Deve essere un URL HTTP o HTTPS valido con host (es. 'https://api.levoci.it')."
+        )
+    }
+
+    // In produzione gli utenti arrivano via HTTPS (Apache): un URL http renderebbe i cookie non `Secure`
+    if app.environment == .production && !baseURL.isSecure {
+        throw ConfigurationError.invalidEnvironmentVariable(
+            name: "PUBLIC_BASE_URL",
+            value: rawValue,
+            reason: "In produzione è obbligatorio il protocollo HTTPS (es. 'https://tuodominio.it'): un URL non cifrato impedirebbe l'invio del flag 'Secure' sui cookie."
+        )
+    }
+    return baseURL
+}
+
+extension Application {
+    private struct PublicBaseURLKey: StorageKey {
+        typealias Value = HTTPURL
+    }
+
+    /// URL pubblico configurato in `configure` (da `PUBLIC_BASE_URL`).
+    var publicBaseURL: HTTPURL {
+        get {
+            guard let value = storage[PublicBaseURLKey.self] else {
+                fatalError("publicBaseURL non configurato: chiama configure(_:) prima di usarlo")
+            }
+            return value
+        }
+        set {
+            storage[PublicBaseURLKey.self] = newValue
+        }
+    }
+}
+
+extension Request {
+    var publicBaseURL: HTTPURL {
+        self.application.publicBaseURL
+    }
 }

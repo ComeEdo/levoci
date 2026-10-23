@@ -9,9 +9,18 @@ enum InputField: String, Sendable, CustomStringConvertible {
     case username
     case email
     case password
+    case token
+    case url
 
-    /// Nome leggibile usato nei messaggi di errore (es. "Username").
-    var displayName: String { rawValue.capitalized }
+    /// Nome leggibile usato nei messaggi di errore (es. "Username", "URL").
+    var displayName: String {
+        switch self {
+        case .url:
+            return "URL"
+        default:
+            return rawValue.capitalized
+        }
+    }
     
     var description: String { displayName }
 }

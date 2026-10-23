@@ -25,7 +25,7 @@ struct AuthTokenMiddleware: AsyncMiddleware {
             throw APIError.forbidden("Email not verified check you inbox", logOut: true)
         }
 
-        if credentials.tokenVersion != payload.tokenVersion {
+        if credentials.tokenVersion != payload.authTokenVersion {
             throw APIError.forbidden("Forbidden - Invalid auth token version", logOut: true)
         }
 

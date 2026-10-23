@@ -233,4 +233,104 @@ struct ValidatedFieldsTests {
         #expect(try hash.verify("secretPassword123"))
         #expect(try !hash.verify("wrongPassword"))
     }
+
+    // MARK: - VerificationToken
+
+    @Test("VerificationToken: trim, accetta JWT lunghi come quelli firmati con RSA e non finisce nei log")
+    func verificationTokenAccepts() throws {
+        // Un JWT RS256 supera i 255 caratteri del limite di default dei campi
+        let longToken = "\(String(repeating: "a", count: 40)).\(String(repeating: "b", count: 130)).\(String(repeating: "c", count: 342))"
+        #expect(longToken.count > 255)
+
+        let token = try VerificationToken(raw: "  \(longToken)\n")
+        #expect(token.value == longToken)
+        #expect("\(token)" == "<redacted>")
+    }
+
+    @Test("VerificationToken: rifiuta vuoto e rispetta i limiti di lunghezza")
+    func verificationTokenRejections() {
+        expectBadRequest("The Token is required") { _ = try VerificationToken(raw: "   ") }
+        expectBadRequest("The Token must be between 10 and 2048 characters long") { _ = try VerificationToken(raw: "a.b.c") }
+        expectBadRequest("The Token must be between 10 and 2048 characters long") {
+            _ = try VerificationToken(raw: "a.b." + String(repeating: "c", count: 2048))
+        }
+    }
+
+    // MARK: - HTTPURL
+
+    @Test("HTTPURL: trim, normalizzazione dello slash finale ed endpoint")
+    func httpURLAcceptsAndNormalizes() throws {
+        let url1 = try HTTPURL(raw: "  https://api.levoci.it/  \n")
+        #expect(url1.value == "https://api.levoci.it")
+        #expect(url1.host == "api.levoci.it")
+        #expect(url1.scheme == "https")
+        #expect(url1.isSecure)
+        #expect("\(url1)" == "https://api.levoci.it")
+        
+        let url2 = try HTTPURL(raw: "http://localhost:8080")
+        #expect(url2.value == "http://localhost:8080")
+        #expect(url2.host == "localhost")
+        #expect(url2.scheme == "http")
+        #expect(!url2.isSecure)
+        
+        // Lo schema è case-insensitive: HTTPS maiuscolo è comunque sicuro
+        #expect(try HTTPURL(raw: "HTTPS://api.levoci.it").isSecure)
+        
+        // Creazione endpoint con query items
+        let endpoint = url1.endpoint("verify", queryItems: [URLQueryItem(name: "token", value: "abc")])
+        #expect(endpoint.absoluteString == "https://api.levoci.it/verify?token=abc")
+
+        // Anche se il path inizia con uno slash, non si crea doppio slash
+        let endpointWithSlash = url1.endpoint("/verify", queryItems: [URLQueryItem(name: "token", value: "abc")])
+        #expect(endpointWithSlash.absoluteString == "https://api.levoci.it/verify?token=abc")
+    }
+
+    @Test("HTTPURL: rispetta i limiti di lunghezza (minimo 8 caratteri per http://a e 9 per https://a, massimo 2048)")
+    func httpURLLengthLimits() throws {
+        // Minimo per http: 8 caratteri ("http://a") -> valido
+        let httpMin = try HTTPURL(raw: "http://a")
+        #expect(httpMin.value.count == 8)
+        #expect(httpMin.value == "http://a")
+        #expect(httpMin.host == "a")
+
+        // Minimo per https: 9 caratteri ("https://a") -> valido
+        let httpsMin = try HTTPURL(raw: "https://a")
+        #expect(httpsMin.value.count == 9)
+        #expect(httpsMin.value == "https://a")
+        #expect(httpsMin.host == "a")
+
+        // Sotto il minimo assoluto: 7 caratteri ("http://") -> rifiutato con messaggio sui limiti
+        expectBadRequest("The URL must be between 8 and 2048 characters long") {
+            _ = try HTTPURL(raw: "http://")
+        }
+
+        // 8 caratteri con https ("https://") supera il limite lunghezza (8 >= 8), ma viene rifiutato per host mancante
+        expectBadRequest("The URL must be a valid http or https URL with a host") {
+            _ = try HTTPURL(raw: "https://")
+        }
+
+        // Massimo consentito: 2048 caratteri -> valido
+        let maxUrlString = "http://a.b/" + String(repeating: "x", count: 2048 - 11)
+        #expect(maxUrlString.count == 2048)
+        let maxUrl = try HTTPURL(raw: maxUrlString)
+        #expect(maxUrl.value.count == 2048)
+
+        // Oltre il limite massimo (2049 caratteri) -> rifiutato
+        let tooLongUrl = maxUrlString + "x"
+        #expect(tooLongUrl.count == 2049)
+        expectBadRequest("The URL must be between 8 and 2048 characters long") {
+            _ = try HTTPURL(raw: tooLongUrl)
+        }
+    }
+
+    @Test("HTTPURL: rifiuta vuoto, schemi non consentiti e URL senza host")
+    func httpURLRejections() {
+        expectBadRequest("The URL is required") { _ = try HTTPURL(raw: "   ") }
+        expectBadRequest("The URL must be between 8 and 2048 characters long") { _ = try HTTPURL(raw: "http://") }
+        expectBadRequest("The URL must be a valid http or https URL with a host") { _ = try HTTPURL(raw: "https://") }
+        expectBadRequest("The URL must be a valid http or https URL with a host") { _ = try HTTPURL(raw: "ftp://example.com") }
+        expectBadRequest("The URL must be a valid http or https URL with a host") { _ = try HTTPURL(raw: "file:///etc/passwd") }
+        expectBadRequest("The URL must be a valid http or https URL with a host") { _ = try HTTPURL(raw: "javascript:alert(1)") }
+        expectBadRequest("The URL must be a valid http or https URL with a host") { _ = try HTTPURL(raw: "not-a-valid-url") }
+    }
 }

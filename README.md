@@ -13,8 +13,13 @@ levoci/
 ├── Public/                       # Asset statici serviti via HTTP
 │   └── img/                      # Immagini pubbliche (es. voci_di_corridoio_logo.png)
 │
-├── Resources/                    # Risorse del server (es. template Leaf per email)
+├── Resources/                    # Risorse del server (template Leaf)
 │   └── Views/                    # Template di visualizzazione
+│       ├── Emails/
+│       │   └── verificationEmail.leaf # Template email di verifica (HTML escapato)
+│       ├── verifyEmail.leaf           # Pagina di conferma verifica email (form POST)
+│       ├── verifyEmailInvalid.leaf    # Pagina di errore link non valido o scaduto
+│       └── verifyEmailSuccess.leaf    # Pagina di conferma avvenuta verifica email
 │
 ├── Sources/levoci/
 │   ├── Controllers/              # Endpoint HTTP e RouteCollection di Vapor
@@ -22,7 +27,8 @@ levoci/
 │   │   ├── UserController.swift       # Profilo utente, Upload/Download Avatar
 │   │   ├── PostController.swift       # Creazione post, Feed con sincronizzazione delta
 │   │   ├── TimetableController.swift  # Consultazione orario scolastico
-│   │   └── ClassController.swift      # Classi scolastiche e indirizzi di studio
+│   │   ├── ClassController.swift      # Classi scolastiche e indirizzi di studio
+│   │   └── WebController.swift        # Pagine web (non API JSON): /emailVerifications flow
 │   │
 │   ├── DTOs/                     # Data Transfer Objects (Codable & Content)
 │   │   ├── AuthDTOs.swift             # Payload richiesta/risposta per autenticazione
@@ -63,7 +69,9 @@ levoci/
 │   │   ├── Username.swift             # Username validato (case-sensitive)
 │   │   ├── Password.swift             # Password con policy + `hashed(on:)` → `PasswordHash` (pronto per il DB)
 │   │   ├── SchoolEmail.swift          # Email istituzionale + ruolo dedotto + SchoolPolicy (dominio)
-│   │   └── ValidatableRequest.swift   # Protocollo dei DTO e helper `req.validatedBody(...)`
+│   │   ├── VerificationToken.swift    # Token di verifica email (sanitizzazione e lunghezza, mai nei log)
+│   │   ├── HTTPURL.swift              # URL HTTP/HTTPS validato con host, normalizzazione ed endpoint
+│   │   └── Validatable.swift          # `ValidatableRequest` (DTO, helper `req.validatedBody(...)`) e `ValidatedField`
 │   │
 │   ├── configure.swift           # Setup DB con mTLS, migrazioni, FileMiddleware e rotte
 │   ├── entrypoint.swift          # Entry point asincrono dell'applicazione
@@ -126,16 +134,19 @@ let body = try req.validatedBody(LoginRequestDTO.self)
 
 | Metodo | Endpoint | Controller | Protezione | Descrizione |
 | :--- | :--- | :--- | :--- | :--- |
-| `GET` | `/` | Base | Pubblico | Health check dell'API |
+| `GET` | `/health` | Base | Pubblico | Health check dell'API |
 | `GET` | `/img/*` | `FileMiddleware` | Pubblico | Asset statici (logo app, immagini pubbliche) |
-| `POST` | `/register` | `AuthController` | Pubblico | Registrazione nuovo utente e credenziali |
-| `GET` | `/verifyEmail/:token` | `AuthController` | Pubblico | Verifica email istituzionale tramite token |
-| `POST` | `/checkUsername` | `AuthController` | Pubblico | Verifica disponibilità username |
+| `POST` | `/auth/registrations` | `AuthController` | Pubblico | Registrazione nuovo utente e credenziali |
+| `GET` | `/emailVerifications?token=...` | `WebController` | Pubblico | Valida il link (GET idempotente), setta cookie HttpOnly temporaneo e reindirizza (`303`) a `/emailVerifications/confirm` |
+| `GET` | `/emailVerifications/confirm` | `WebController` | Pubblico | Pagina di conferma con pulsante per eseguire la POST di verifica |
+| `POST` | `/emailVerifications/confirm` | `WebController` | Pubblico | Consuma il token dal cookie HttpOnly, valida `tokenVersion`, imposta `isEmailVerified = true` su DB, elimina il cookie e reindirizza (`303`) a `/emailVerifications/success` |
+| `GET` | `/emailVerifications/success` | `WebController` | Pubblico | Pagina di conferma avvenuta verifica email |
+| `POST` | `/usernames/availability` | `AuthController` | Pubblico | Verifica disponibilità username (204 se disponibile, 409 se occupato) |
 | `POST` | `/login` | `AuthController` | Pubblico | Login con email/password, restituisce `authToken` e profili |
-| `GET` | `/auth/isAuthTokenValid` | `AuthController` | `AuthToken` | Verifica stato e validità dell'AuthToken |
+| `GET` | `/auth/session` | `AuthController` | `AuthToken` | Verifica stato e validità dell'AuthToken |
 | `POST` | `/auth/getTokenAndUser` | `AuthController` | `AuthToken` | Rilascia `userToken` per il profilo utente selezionato |
 | `POST` | `/auth/refreshAuthToken` | `AuthController` | `AuthToken` | Refresh dell'AuthToken (valido dopo 24h dall'emissione) |
-| `POST` | `/auth/logoutAll` | `AuthController` | `AuthToken` | Rigenera `tokenVersion` su `credentials` invalidando tutti i dispositivi |
+| `DELETE` | `/auth/sessions` | `AuthController` | `AuthToken` | Rigenera `tokenVersion` su `credentials` invalidando tutti i dispositivi |
 | `GET` | `/user/isUserTokenValid` | `UserController` | `UserToken` | Verifica validità dello UserToken |
 | `GET` | `/user/refreshUserToken` | `UserController` | `UserToken` | Refresh dello UserToken (valido dopo 10 min dall'emissione) |
 | `POST` | `/user/profileImage` | `UserController` | `UserToken` | Upload immagine profilo con ritaglio 1:1 |
@@ -186,6 +197,10 @@ L'architettura di produzione prevede **Apache** esposto su porta 443 (HTTPS) che
     # Inoltro a Swift Vapor
     ProxyPass / http://127.0.0.1:8080/
     ProxyPassReverse / http://127.0.0.1:8080/
+
+    # Privacy dei log: esclude i token di verifica email dai log di accesso Apache
+    SetEnvIf Request_URI "^/emailVerifications" dontlog
+    CustomLog /var/log/apache2/levoci_access.log combined env=!dontlog
 </VirtualHost>
 ```
 
@@ -207,6 +222,12 @@ DATABASE_CA_CERT_PATH=/path/to/ca-cert.pem
 DATABASE_CLIENT_CERT_PATH=/path/to/client-cert.pem
 DATABASE_CLIENT_KEY_PATH=/path/to/client-key.pem
 DATABASE_TLS_VERIFY=true
+
+# URL pubblico (quello visibile agli utenti, cioè Apache) usato nei link delle email di verifica.
+# Dietro Apache l'app ascolta su 127.0.0.1:8080, quindi in produzione va impostato SEMPRE (es. https://tuodominio.it).
+# Se manca, in produzione l'app non parte; negli altri ambienti usa l'indirizzo di bind con un warning.
+# In produzione deve essere https: lo schema decide anche l'attributo `Secure` dei cookie (HTTPURL.isSecure).
+PUBLIC_BASE_URL=https://tuodominio.it
 
 # JWT RS256 Keys
 JWT_PRIVATE_KEY_PATH=/path/to/private.pem

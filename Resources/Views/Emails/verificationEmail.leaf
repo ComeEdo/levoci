@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Verifica Email</title>
+</head>
+<body style="margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f7f7f7; color: #333;">
+  <div style="max-width: 560px; margin: 0 auto; background-color: #ffffff; padding: 32px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+    <h1 style="text-align: center; margin-top: 0; font-size: 24px; color: #111;">Ciao, #(username)!</h1>
+    <p style="font-size: 16px; line-height: 1.5; color: #555;">
+      Grazie per esserti registrato a <strong>Voci di Corridoio</strong>! Per completare la registrazione e verificare il tuo indirizzo istituzionale, clicca sul pulsante qui sotto:
+    </p>
+    <div style="text-align: center; margin: 32px 0;">
+      <a href="#(verificationLink)" style="background-color: #0070f3; color: #ffffff; padding: 12px 24px; text-decoration: none; font-weight: bold; border-radius: 6px; display: inline-block;">Verifica Email</a>
+    </div>
+    <p style="font-size: 14px; line-height: 1.5; color: #777;">
+      Se il pulsante non funziona, copia e incolla questo link nel browser:<br>
+      <a href="#(verificationLink)" style="color: #0070f3; word-break: break-all;">#(verificationLink)</a>
+    </p>
+    <p style="font-size: 13px; color: #999; margin-top: 24px;">
+      Questo link scadrà tra 1 ora. Se non hai richiesto tu la registrazione, puoi ignorare questa email.
+    </p>
+  </div>
+</body>
+</html>

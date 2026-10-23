@@ -5,20 +5,21 @@ import FluentKit
 /// Controller per la gestione dell'autenticazione e delle credenziali
 struct AuthController: RouteCollection {
     func boot(routes: any RoutesBuilder) throws {
-        // Registrazione e verifica
-        routes.post("register", use: register)
-        routes.get("verifyEmail", ":token", use: verifyEmail)
-        routes.post("checkUsername", use: checkUsername)
+        // Gruppo /auth pubblico
+        let auth = routes.grouped("auth")
+        auth.post("registrations", use: register)
+        auth.post("sessions", use: login)
 
-        // Login
-        routes.post("login", use: login)
+        // Gruppo /usernames pubblico
+        let usernames = routes.grouped("usernames")
+        usernames.post("availability", use: isUsernameAvailable)
 
-        // Rotte protette da AuthToken
-        let authProtected = routes.grouped("auth").grouped(AuthTokenMiddleware())
-        authProtected.get("isAuthTokenValid", use: isAuthTokenValid)
-        authProtected.post("getTokenAndUser", use: getTokenAndUser)
-        authProtected.post("refreshAuthToken", use: refreshAuthToken)
-        authProtected.post("logoutAll", use: logoutAll)
+        // Gruppo /auth protetto da AuthToken
+        let authProtected = auth.grouped(AuthTokenMiddleware())
+        authProtected.get("session", use: isAuthTokenValid)
+        authProtected.post("userSessions", use: getTokenAndUser)
+        authProtected.post("tokens", "refresh", use: refreshAuthToken)
+        authProtected.delete("sessions", use: logoutAll)
     }
     
     @Sendable
@@ -89,10 +90,19 @@ struct AuthController: RouteCollection {
         let userDir = URL(fileURLWithPath: req.application.directory.workingDirectory).appendingPathComponent("users").appendingPathComponent(userId.uuidString)
         try? FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
 
-        do {
-            try await credentials.sendVerificationEmailIfNeeded(req: req)
-        } catch {
-            req.logger.error("Impossibile inviare email di verifica a \(userId): \(error)")
+        let credId = try credentials.requireID()
+        let userEmail = credentials.email
+        let tokenVersion = credentials.tokenVersion
+        let username = user.username
+        let emailService = req.emailService
+        let logger = req.logger
+
+        Task {
+            do {
+                try await emailService.sendVerificationEmail(to: userEmail, credentialsId: credId, tokenVersion: tokenVersion, username: username)
+            } catch {
+                logger.error("Impossibile inviare email di verifica a \(userId): \(error)")
+            }
         }
 
         req.logger.info("Registrazione completata con successo per userId: \(userId)")
@@ -102,15 +112,16 @@ struct AuthController: RouteCollection {
     }
 
     @Sendable
-    func verifyEmail(req: Request) async throws -> Response {
-        // TODO: Implementare verifica email tramite token
-        throw Abort(.notImplemented)
-    }
+    func isUsernameAvailable(req: Request) async throws -> HTTPStatus {
+        let username = try req.validatedBody(CheckUsernameRequest.self)
 
-    @Sendable
-    func checkUsername(req: Request) async throws -> Response {
-        // TODO: Implementare verifica disponibilità username
-        throw Abort(.notImplemented)
+        let exists = try await User.query(on: req.db).filter(\.$username == username.value).first() != nil
+
+        guard !exists else {
+            throw APIError.conflict("Username already exists")
+        }
+
+        return .noContent
     }
 
     @Sendable

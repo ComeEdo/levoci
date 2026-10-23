@@ -21,6 +21,11 @@ extension Request {
     func validatedBody<T: ValidatableRequest>(_ type: T.Type) throws -> T.Validated {
         try content.decode(T.self).validated()
     }
+
+    /// Decodifica la query string e restituisce solo il valore validato.
+    func validatedQuery<T: ValidatableRequest>(_ type: T.Type) throws -> T.Validated {
+        try query.decode(T.self).validated()
+    }
 }
 
 /// Protocollo comune per tutti i campi validati che incapsulano un valore primitivo (`String`).

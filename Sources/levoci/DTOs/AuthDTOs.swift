@@ -56,6 +56,16 @@ struct RegisterResponse: Content {
     let username: String
 }
 
+// MARK: - Verifica Email
+/// Query di `GET /emailVerifications?token=...`.
+struct EmailVerificationQuery: ValidatableRequest {
+    let token: String
+
+    func validated() throws -> VerificationToken {
+        try VerificationToken(raw: token)
+    }
+}
+
 // MARK: - Login
 struct LoginRequestDTO: Content {
     let email: String
@@ -74,18 +84,11 @@ struct LoginResponseDTO: Content {
 }
 
 // MARK: - Verifica Username
-struct CheckUsernameRequestDTO: Content {
+struct CheckUsernameRequest: ValidatableRequest {
     let username: String
-}
-
-struct CheckUsernameResponseDTO: Content {
-    let success: Bool
-    let message: String
-    let data: CheckUsernameData
     
-    struct CheckUsernameData: Content {
-        let exists: Bool
-        let username: String?
+    func validated() throws -> Username {
+        try Username(raw: username)
     }
 }
 
