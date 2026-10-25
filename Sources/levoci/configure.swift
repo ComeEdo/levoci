@@ -62,10 +62,10 @@ func configure(_ app: Application) async throws {
 
     app.middleware.use(CustomErrorMiddleware())
 
-    app.migrations.add(CreateCredentials())
-    app.migrations.add(CreateAcademicStructure())
-    app.migrations.add(CreateUsers())
-    app.migrations.add(CreatePostsAndVotes())
+    //app.migrations.add(CreateCredentials())
+    //app.migrations.add(CreateAcademicStructure())
+    //app.migrations.add(CreateUsers())
+    //app.migrations.add(CreatePostsAndVotes())
 
     app.views.use(.leaf)
 

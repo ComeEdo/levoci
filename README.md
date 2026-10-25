@@ -169,37 +169,112 @@ La connessione al database MariaDB utilizza **autenticazione a certificati digit
 
 ---
 
+## 🐬 Compatibilità MariaDB: Patch `mysql-nio` (UUID e TIME)
+
+Per garantire la piena interoperabilità con MariaDB e lo schema del database (`Database/schema.sql`), sono necessarie due piccole patch nella libreria di basso livello `vapor/mysql-nio` (`Sources/MySQLNIO/MySQLData.swift`):
+
+### 1. Supporto al Tipo Nativo `UUID` (36 caratteri)
+MariaDB (dalla versione 10.7 in poi) adotta il tipo di dato nativo **`UUID`**. Internamente MariaDB memorizza il valore a 128 bit (16 byte), ma attraverso il protocollo client binario lo restituisce formattato come stringa canonica da **36 caratteri** (es. `9107da00-bf8e-4472-a0e3-6ea452f43c96`).
+
+La libreria upstream `vapor/mysql-nio` di default accetta solo buffer binari rigidi da 16 byte (`buffer.readableBytes == 16`), generando a runtime l'errore `DecodingError.typeMismatch (Could not convert MySQL data to Optional<UUID>)`.
+
+Nella proprietà `public var uuid: UUID?` (riga ~305), è stato aggiunto il supporto per buffer da 36 caratteri:
+```swift
+public var uuid: UUID? {
+    switch self.format {
+    case .binary:
+        guard var buffer = self.buffer else { return nil }
+        if buffer.readableBytes == 16 {
+            guard let bytes = buffer.readBytes(length: 16) else { return nil }
+            return UUID(uuid: (
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11],
+                bytes[12], bytes[13], bytes[14], bytes[15]
+            ))
+        } else if buffer.readableBytes == 36 {
+            // Supporto nativo per il tipo UUID di MariaDB (stringa da 36 caratteri)
+            return buffer.readString(length: 36).flatMap(UUID.init)
+        } else {
+            return nil
+        }
+    case .text:
+        return self.string.flatMap(UUID.init)
+    }
+}
+```
+
+### 2. Conversione del Tipo Nativo `TIME` in `String`
+Nella tabella dell'orario scolastico (`timetable`), i campi orari sono definiti con il tipo SQL `TIME`. MariaDB restituisce tali valori con il tag di tipo `.time`. Di default `mysql-nio` non gestisce il case `.time` all'interno della proprietà `public var string: String?`, restituendo `nil` e impedendo a Fluent di mappare l'orario in una stringa Swift.
+
+Nella proprietà `public var string: String?` (riga ~185), è stato aggiunto il case per il tipo `.time`:
+```swift
+case .longlong, .long, .int24, .short, .tiny, .bit:
+    return self.int?.description
+case .time:
+    // Supporto conversione orario SQL TIME -> "HH:MM:SS"
+    guard let t = self.time, let h = t.hour, let m = t.minute, let s = t.second else { return nil }
+    return String(format: "%02d:%02d:%02d", h, m, s)
+default:
+    return nil
+```
+
+> [!NOTE]
+> Quando si clona ed esegue il progetto su un nuovo ambiente (es. nuovo Mac, server Linux o container Docker), assicurarsi che la checkout locale di `mysql-nio` contenga queste modifiche (oppure puntare a un fork dedicato in `Package.swift`), permettendo a tutte le query Fluent (`@ID`, relazioni, join e orari) di operare correttamente con MariaDB.
+
+---
+
 ## 🌐 Infrastruttura: Apache come Reverse Proxy & SSL/TLS
 
 L'architettura di produzione prevede **Apache** esposto su porta 443 (HTTPS) che gestisce la cifratura SSL/TLS esterna (TLS Termination) e inoltra le richieste in HTTP locale all'applicazione Swift in esecuzione su porta 8080 (`127.0.0.1:8080`).
 
 ```apache
+<VirtualHost *:80>
+    ServerName api.tuodominio.it
+    ServerAdmin admin@tuodominio.it
+
+    # Reindirizzamento permanente HTTP -> HTTPS
+    Redirect permanent / https://api.tuodominio.it/
+
+    ErrorLog ${APACHE_LOG_DIR}/levoci_error.log
+    CustomLog ${APACHE_LOG_DIR}/levoci_access.log combined
+</VirtualHost>
+
 <VirtualHost *:443>
     ServerName api.tuodominio.it
+    ServerAdmin admin@tuodominio.it
 
-    # Gestione SSL / Let's Encrypt in Apache
+    Protocols h2 http/1.1
+
+    # Terminazione SSL/TLS
     SSLEngine on
-    SSLCertificateFile /etc/letsencrypt/live/api.tuodominio.it/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/api.tuodominio.it/privkey.pem
+    SSLCertificateFile      /etc/ssl/certs/tuodominio.crt
+    SSLCertificateKeyFile   /etc/ssl/private/tuodominio.key
 
-    # Header fondamentali per il reverse proxy
+    # Header per comunicare a Vapor che la richiesta originale è HTTPS
     ProxyPreserveHost On
     RequestHeader set X-Forwarded-Proto "https"
     RequestHeader set X-Forwarded-Port "443"
 
-    # Servire file statici direttamente con Apache
-    Alias /img /var/www/levoci/Public/img
-    <Directory /var/www/levoci/Public/img>
+    # Cartella radice per la consegna diretta dei file statici tramite Apache
+    DocumentRoot /percorso/al/progetto/Public
+    <Directory /percorso/al/progetto/Public>
+        Options -Indexes +FollowSymLinks
+        AllowOverride None
         Require all granted
     </Directory>
 
-    # Inoltro a Swift Vapor
+    # Esclude i file statici dal proxy inverso verso Swift
+    ProxyPassMatch \.(png|jpe?g|gif|ico|svg|css|js|webp|txt|pdf)$ !
+
+    # Inoltro a Swift / Vapor in locale
     ProxyPass / http://127.0.0.1:8080/
     ProxyPassReverse / http://127.0.0.1:8080/
 
-    # Privacy dei log: esclude i token di verifica email dai log di accesso Apache
+    # Privacy dei log: esclude la registrazione dei token di verifica email
     SetEnvIf Request_URI "^/emailVerifications" dontlog
-    CustomLog /var/log/apache2/levoci_access.log combined env=!dontlog
+    CustomLog ${APACHE_LOG_DIR}/levoci_ssl_access.log combined env=!dontlog
+    ErrorLog ${APACHE_LOG_DIR}/levoci_ssl_error.log
 </VirtualHost>
 ```
 
@@ -208,19 +283,11 @@ L'architettura di produzione prevede **Apache** esposto su porta 443 (HTTPS) che
 ## ⚙️ Variabili d'Ambiente (`.env`)
 
 ```env
-# Server
+# Server Configuration
 PORT=8080
+HOSTNAME=0.0.0.0
 ENVIRONMENT=development
-
-# Database MariaDB (Two-Way SSL / mTLS Authentication - No Password)
-DATABASE_HOST=127.0.0.1
-DATABASE_PORT=3306
-DATABASE_USERNAME=app_user_levoci
-DATABASE_NAME=levoci
-DATABASE_CA_CERT_PATH=/path/to/ca-cert.pem
-DATABASE_CLIENT_CERT_PATH=/path/to/client-cert.pem
-DATABASE_CLIENT_KEY_PATH=/path/to/client-key.pem
-DATABASE_TLS_VERIFY=true
+LOG_LEVEL=notice
 
 # URL pubblico (quello visibile agli utenti, cioè Apache) usato nei link delle email di verifica.
 # Dietro Apache l'app ascolta su 127.0.0.1:8080, quindi in produzione va impostato SEMPRE (es. https://tuodominio.it).
@@ -228,16 +295,28 @@ DATABASE_TLS_VERIFY=true
 # In produzione deve essere https: lo schema decide anche l'attributo `Secure` dei cookie (HTTPURL.isSecure).
 PUBLIC_BASE_URL=https://tuodominio.it
 
-# JWT RS256 Keys
+# Database MariaDB (Two-Way SSL / mTLS Authentication - No Password)
+DATABASE_HOST=127.0.0.1
+DATABASE_PORT=3306
+DATABASE_USERNAME=app_user_levoci
+DATABASE_NAME=levoci
+DATABASE_PASSWORD=
+DATABASE_CA_CERT_PATH=/path/to/ca-cert.pem
+DATABASE_CLIENT_CERT_PATH=/path/to/client-cert.pem
+DATABASE_CLIENT_KEY_PATH=/path/to/client-key.pem
+DATABASE_TLS_VERIFY=true
+DATABASE_POOL_LIMIT=5
+
+# JWT RS256 Asymmetric Keys
 JWT_PRIVATE_KEY_PATH=/path/to/private.pem
 JWT_PUBLIC_KEY_PATH=/path/to/public.pem
 
-# SMTP / Email Service
+# SMTP / Email Verification Service
 SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
+SMTP_PORT=587
 SMTP_USERNAME=corridoio.delle.voci@gmail.com
 SMTP_PASSWORD=
-EMAIL_FROM=corridoio.delle.voci@gmail.com
+SMTP_FROM_NAME=VDC
 
 # Storage
 AVATAR_STORAGE_DIR=/var/data/levoci/users
