@@ -39,7 +39,7 @@ struct WebController: RouteCollection {
             return try await renderedResponse(named: "verifyEmailInvalid", status: .badRequest, for: req)
         }
 
-        if credentials.isEmailVerified {
+        guard !credentials.isEmailVerified else {
             var response = req.redirect(to: "/\(Self.emailVerificationPath)/duplicate")
             response.cookies[Self.emailVerificationCookieName] = expiredVerificationCookie(for: req)
             addSensitiveResponseHeaders(to: &response)
@@ -76,8 +76,7 @@ struct WebController: RouteCollection {
 
         let payload: EmailVerificationPayload
         do {
-            let token = try VerificationToken(raw: cookie.string)
-            payload = try await token.verify(on: req)
+            payload = try await VerificationToken(raw: cookie.string).verify(on: req)
         } catch {
             return try await renderedResponse(named: "verifyEmailInvalid", status: .badRequest, for: req)
         }

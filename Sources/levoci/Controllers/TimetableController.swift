@@ -2,7 +2,7 @@ import Vapor
 
 /// Controller per la consultazione dell'orario scolastico (timetable)
 struct TimetableController: RouteCollection {
-    func boot(routes: RoutesBuilder) throws {
+    func boot(routes: any RoutesBuilder) throws {
         let timetableRoutes = routes.grouped("user")
         
         timetableRoutes.get("getTimetable", use: getTimetable)

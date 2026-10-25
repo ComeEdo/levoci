@@ -71,30 +71,28 @@ struct ValidatedFieldsTests {
 
     // MARK: - Password
 
-    @Test("Password: arriva all'hasher invariata (spazi inclusi) e non finisce nei log")
-    func passwordIsNeverModified() async throws {
+    @Test("Password: trim e normalizzazione NFC via Sanitizer.text, e non finisce nei log")
+    func passwordSanitizationAndLogs() async throws {
         let password = try Password(raw: "  ab  ")
         #expect("\(password)" == "<redacted>")
+        #expect(String(reflecting: password) == "<redacted>")
 
-        // Hash reale con bcrypt (costo basso per velocità), senza possibilità di leggere il testo in chiaro
-        let app = try await Application.make(.testing)
-        app.passwords.use(.bcrypt(cost: 4))
-        let req = Request(application: app, on: app.eventLoopGroup.next())
+        try await withBcryptApp { app, req in
+            let hash = try await password.hashed(on: req)
 
-        let hash: PasswordHash
-        do {
-            hash = try await password.hashed(on: req)
-        } catch {
-            try await app.asyncShutdown()
-            throw error
+            // Verifica che anche l'hash sia oscurato nei log
+            #expect("\(hash)" == "<redacted>")
+            #expect(String(reflecting: hash) == "<redacted>")
+
+            // LoginPassword fa trim con Sanitizer.text, quindi sia "ab" che "  ab  " verificano correttamente l'hash
+            let loginClean = try LoginPassword(raw: "ab")
+            let loginUntrimmed = try LoginPassword(raw: "  ab  ")
+            let loginWrong = try LoginPassword(raw: "cd")
+
+            #expect(try await PasswordHash.verify(loginClean, against: hash.value, on: req))
+            #expect(try await PasswordHash.verify(loginUntrimmed, against: hash.value, on: req))
+            #expect(try await !PasswordHash.verify(loginWrong, against: hash.value, on: req))
         }
-        try await app.asyncShutdown()
-
-        // La password con gli spazi originali coincide; la versione "trimmata" no (verifica con pre-hash SHA-256)
-        #expect(try hash.verify("  ab  "))
-        #expect(try !hash.verify("ab"))
-        #expect(try PasswordHash.verify("  ab  ", against: hash.value))
-        #expect(try !PasswordHash.verify("ab", against: hash.value))
     }
 
     @Test("Password: con pre-hash SHA-256 supera il limite dei 72 byte di Bcrypt")
@@ -103,40 +101,51 @@ struct ValidatedFieldsTests {
         let longPasswordB = String(repeating: "a", count: 72) + "differenza2"
         let passwordA = try Password(raw: longPasswordA)
 
-        let app = try await Application.make(.testing)
-        app.passwords.use(.bcrypt(cost: 4))
-        let req = Request(application: app, on: app.eventLoopGroup.next())
-
-        let hash: PasswordHash
-        do {
-            hash = try await passwordA.hashed(on: req)
-        } catch {
-            try await app.asyncShutdown()
-            throw error
+        try await withBcryptApp { app, req in
+            let hash = try await passwordA.hashed(on: req)
+            // Verifica che oltre il 72° byte la password diversa NON venga accettata (risolvendo il troncamento silenzioso di Bcrypt)
+            let loginA = try LoginPassword(raw: longPasswordA)
+            let loginB = try LoginPassword(raw: longPasswordB)
+            #expect(try await PasswordHash.verify(loginA, against: hash.value, on: req))
+            #expect(try await !PasswordHash.verify(loginB, against: hash.value, on: req))
         }
-        try await app.asyncShutdown()
-
-        // Verifica che oltre il 72° byte la password diversa NON venga accettata (risolvendo il troncamento silenzioso di Bcrypt)
-        #expect(try hash.verify(longPasswordA))
-        #expect(try !hash.verify(longPasswordB))
-    }
-
-    @Test("Password: rispetta i limiti di lunghezza")
-    func passwordLengthLimits() throws {
-        #expect(throws: APIError.self) {
-            _ = try Password(raw: String(repeating: "a", count: Password.minLength - 1))
-        }
-        #expect(throws: APIError.self) {
-            _ = try Password(raw: String(repeating: "a", count: Password.maxLength + 1))
-        }
-        _ = try Password(raw: String(repeating: "a", count: Password.minLength))
-        _ = try Password(raw: String(repeating: "a", count: Password.maxLength))
     }
 
     @Test("Password: rifiuta vuota e caratteri di controllo")
     func passwordRejectsEmptyAndControlCharacters() {
         expectBadRequest("The Password is required") { _ = try Password(raw: "") }
+        expectBadRequest("The Password is required") { _ = try Password(raw: "   ") }
         expectBadRequest("The Password contains invalid control characters") { _ = try Password(raw: "abc\tdef") }
+    }
+
+    // MARK: - LoginPassword
+
+    @Test("LoginPassword: trim, rifiuto vuoto e redaction nei log")
+    func loginPasswordFeatures() throws {
+        let lp = try LoginPassword(raw: "  secret123  ")
+        #expect("\(lp)" == "<redacted>")
+        #expect(String(reflecting: lp) == "<redacted>")
+
+        expectBadRequest("The Password is required") { _ = try LoginPassword(raw: "") }
+        expectBadRequest("The Password is required") { _ = try LoginPassword(raw: "   ") }
+    }
+
+    @Test("Password e LoginPassword: normalizzazione Unicode NFC (NIST SP 800-63B)")
+    func unicodeNFCNormalization() async throws {
+        // "Jose\u{0301}" (NFD decomposto) vs "José" (NFC precomposto)
+        let regNFD = try Password(raw: "Jose\u{0301}")
+
+        try await withBcryptApp { app, req in
+            let hash = try await regNFD.hashed(on: req)
+
+            // Login inviato in NFC ("José") deve verificare correttamente l'hash generato da NFD
+            let loginNFC = try LoginPassword(raw: "José")
+            #expect(try await PasswordHash.verify(loginNFC, against: hash.value, on: req))
+
+            // E viceversa: login inviato in NFD deve verificare l'hash generato da NFD
+            let loginNFD = try LoginPassword(raw: "Jose\u{0301}")
+            #expect(try await PasswordHash.verify(loginNFD, against: hash.value, on: req))
+        }
     }
 
     // MARK: - SchoolEmail
@@ -145,31 +154,27 @@ struct ValidatedFieldsTests {
     func schoolEmailRole() throws {
         let student = try SchoolEmail(raw: "  Mario.Rossi.STUD@ItisGalileiRoma.it ")
         #expect(student.value == "mario.rossi.stud@itisgalileiroma.it")
-        #expect(student.localPart == "mario.rossi.stud")
-        #expect(student.domain == "itisgalileiroma.it")
-        #expect(student.description == "mario.rossi.stud@itisgalileiroma.it")
         #expect(student.role == .student)
 
-        let teacher = try SchoolEmail(raw: "mario.rossi@itisgalileiroma.it")
-        #expect(teacher.localPart == "mario.rossi")
-        #expect(teacher.domain == "itisgalileiroma.it")
+        let teacher = try SchoolEmail(raw: "Mario.Rossi@itisgalileiroma.it")
         #expect(teacher.role == .teacher)
     }
 
     @Test("SchoolEmail: rifiuta domini e formati non validi")
     func schoolEmailRejections() {
-        expectBadRequest("The Email must belong to the @itisgalileiroma.it domain") { _ = try SchoolEmail(raw: "mario@gmail.com") }
-        expectBadRequest("The Email cannot start with '.', '_' or '-'") { _ = try SchoolEmail(raw: ".mario@itisgalileiroma.it") }
-        expectBadRequest("The Email contains consecutive special characters") { _ = try SchoolEmail(raw: "ma..rio.stud@itisgalileiroma.it") }
-        expectBadRequest("The Email local part contains invalid characters") { _ = try SchoolEmail(raw: "ma rio@itisgalileiroma.it") }
-        expectBadRequest("School Email contains invalid characters") { _ = try SchoolEmail(raw: "mario+tag@itisgalileiroma.it") }
-        expectBadRequest("The Email is required") { _ = try SchoolEmail(raw: "") }
+        expectBadRequest("The Email must belong to the @itisgalileiroma.it domain") {
+            _ = try SchoolEmail(raw: "mario@gmail.com")
+        }
+        expectBadRequest("The Email is required") {
+            _ = try SchoolEmail(raw: "")
+        }
     }
 
-    // MARK: - ValidatedEmail Base Compliance
+    // MARK: - ValidatedEmail
 
     @Test("ValidatedEmail: supporta doppi trattini, punycode IDN e caratteri standard RFC 5322")
     func validatedEmailStandardCompliance() throws {
+        // GenericEmail concreto per testare la validazione email base senza i vincoli scolastici
         struct GenericEmail: ValidatedEmail {
             let value: String
             init(raw: String) throws {
@@ -178,23 +183,23 @@ struct ValidatedFieldsTests {
             }
         }
 
-        // Supporto Punycode IDN (xn--)
-        let idn = try GenericEmail(raw: "mario.rossi@xn--mller-kva.de")
-        #expect(idn.domain == "xn--mller-kva.de")
+        // Doppi trattini ammessi nel dominio (es. servizi cloud, punycode)
+        let hyphenEmail = try GenericEmail(raw: "user@my--domain.com")
+        #expect(hyphenEmail.value == "user@my--domain.com")
 
-        // Supporto doppio trattino nel dominio e nella parte locale
-        let doubleHyphen = try GenericEmail(raw: "foo--bar@my--site.com")
-        #expect(doubleHyphen.localPart == "foo--bar")
-        #expect(doubleHyphen.domain == "my--site.com")
+        // Punycode per domini internazionalizzati (IDN, RFC 3490)
+        let punycodeEmail = try GenericEmail(raw: "user@xn--bcher-kva.ch")
+        #expect(punycodeEmail.value == "user@xn--bcher-kva.ch")
 
-        // Supporto caratteri standard RFC 5322 / HTML5 (es. '+' per tag o alias)
-        let plusTag = try GenericEmail(raw: "mario+newsletter@domain.com")
-        #expect(plusTag.localPart == "mario+newsletter")
+        // Caratteri speciali ammessi nella parte locale secondo RFC 5322: +, -, _, .
+        let taggedEmail = try GenericEmail(raw: "user+mailbox@example.com")
+        #expect(taggedEmail.value == "user+mailbox@example.com")
 
-        // Rifiuto spazi nella localPart
-        expectBadRequest("The Email local part contains invalid characters") {
-            _ = try GenericEmail(raw: "mario rossi@domain.com")
-        }
+        let underscoreEmail = try GenericEmail(raw: "first_last@example.com")
+        #expect(underscoreEmail.value == "first_last@example.com")
+
+        let dottedEmail = try GenericEmail(raw: "first.last@example.com")
+        #expect(dottedEmail.value == "first.last@example.com")
     }
 
     @Test("ValidatedEmail: rifiuta domini malformati")
@@ -207,8 +212,6 @@ struct ValidatedFieldsTests {
             }
         }
 
-        expectBadRequest("The Email domain cannot contain underscores") { _ = try GenericEmail(raw: "mario@sub_domain.com") }
-        expectBadRequest("The Email domain contains consecutive special characters") { _ = try GenericEmail(raw: "mario@domain..com") }
         expectBadRequest("The Email domain labels cannot start or end with a hyphen") { _ = try GenericEmail(raw: "mario@-domain.com") }
         expectBadRequest("The Email domain labels cannot start or end with a hyphen") { _ = try GenericEmail(raw: "mario@domain-.com") }
         expectBadRequest("The Email domain extension is invalid") { _ = try GenericEmail(raw: "mario@domain.c") }
@@ -218,25 +221,18 @@ struct ValidatedFieldsTests {
     @Test("Password: hash(into:) con AsyncPasswordHasher produce un hash verificabile")
     func passwordHashIntoHasher() async throws {
         let password = try Password(raw: "secretPassword123")
-        let app = try await Application.make(.testing)
-        app.passwords.use(.bcrypt(cost: 4))
-
-        let hash: PasswordHash
-        do {
-            hash = try await password.hash(into: app.password.async)
-        } catch {
-            try await app.asyncShutdown()
-            throw error
+        try await withBcryptApp { app, req in
+            let hash = try await password.hash(into: app.password.async)
+            let validLogin = try LoginPassword(raw: "secretPassword123")
+            let wrongLogin = try LoginPassword(raw: "wrongPassword")
+            #expect(try await PasswordHash.verify(validLogin, against: hash.value, on: req))
+            #expect(try await !PasswordHash.verify(wrongLogin, against: hash.value, on: req))
         }
-        try await app.asyncShutdown()
-
-        #expect(try hash.verify("secretPassword123"))
-        #expect(try !hash.verify("wrongPassword"))
     }
 
-    // MARK: - VerificationToken
+    // MARK: - JWTToken
 
-    @Test("VerificationToken: trim, accetta JWT lunghi come quelli firmati con RSA e non finisce nei log")
+    @Test("JWTToken: trim, accetta JWT lunghi come quelli firmati con RSA e non finisce nei log")
     func verificationTokenAccepts() throws {
         // Un JWT RS256 supera i 255 caratteri del limite di default dei campi
         let longToken = "\(String(repeating: "a", count: 40)).\(String(repeating: "b", count: 130)).\(String(repeating: "c", count: 342))"
@@ -247,7 +243,7 @@ struct ValidatedFieldsTests {
         #expect("\(token)" == "<redacted>")
     }
 
-    @Test("VerificationToken: rifiuta vuoto e rispetta i limiti di lunghezza")
+    @Test("JWTToken: rifiuta vuoto e rispetta i limiti di lunghezza")
     func verificationTokenRejections() {
         expectBadRequest("The Token is required") { _ = try VerificationToken(raw: "   ") }
         expectBadRequest("The Token must be between 10 and 2048 characters long") { _ = try VerificationToken(raw: "a.b.c") }

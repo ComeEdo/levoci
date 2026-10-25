@@ -1,6 +1,6 @@
 -- MySQL dump 10.13  Distrib 26.7.0, for macos27.0 (arm64)
 --
--- Host: 127.0.0.1    Database: levoci
+-- Host: VDC.local    Database: levoci
 -- ------------------------------------------------------
 -- Server version	11.8.6-MariaDB-0+deb13u1
 
@@ -49,10 +49,12 @@ CREATE TABLE `credentials` (
   `password` char(60) NOT NULL,
   `tokenVersion` uuid NOT NULL DEFAULT uuid(),
   `isEmailVerified` tinyint(1) NOT NULL DEFAULT 0,
+  `verificationEmailSentAt` timestamp NULL DEFAULT NULL,
   `dateOfCreation` timestamp NOT NULL DEFAULT current_timestamp(),
   `lastUpdated` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
-  UNIQUE KEY `email` (`email`)
+  UNIQUE KEY `email` (`email`),
+  CONSTRAINT `chk_credentials_verified_sent_at` CHECK (`isEmailVerified` = 0 or `verificationEmailSentAt` is null)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -276,4 +278,4 @@ CREATE TABLE `votes` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-09-27 19:51:08
+-- Dump completed on 2026-10-25 11:56:36

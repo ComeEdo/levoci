@@ -2,12 +2,12 @@ import Foundation
 import Vapor
 import JWT
 
-/// Token di verifica email sanificato e protetto da limiti di lunghezza.
+/// Token JWT sanificato e protetto da limiti di lunghezza.
 /// Firma, scadenza, claim e formato li controlla direttamente JWTKit al momento dell'uso.
-struct VerificationToken: ValidatedField, Equatable, Sendable {
-    static let minLength = 10
+struct JWTToken<Payload: JWTPayload>: ValidatedField, Equatable, Sendable {
+    static var minLength: Int { 10 }
     /// I JWT firmati con chiavi asimmetriche superano il limite di default di 255 caratteri.
-    static let maxLength = 2048
+    static var maxLength: Int { 2048 }
     
     /// Valore canonico (sanificato) da passare alla verifica JWT.
     let value: String
@@ -24,12 +24,16 @@ struct VerificationToken: ValidatedField, Equatable, Sendable {
         self.value = clean
     }
     
-    /// Verifica la firma e la validità del token JWT tramite Vapor JWT, restituendo il payload di verifica email.
+    /// Verifica la firma e la validità del token JWT tramite Vapor JWT.
     @discardableResult
-    func verify(on req: Request) async throws -> EmailVerificationPayload {
-        try await req.jwt.verify(self.value, as: EmailVerificationPayload.self)
+    func verify(on req: Request) async throws -> Payload {
+        try await req.jwt.verify(self.value, as: Payload.self)
     }
-    
-    /// Il token autorizza una verifica: non deve finire nei log.
+
+    /// I token non devono finire nei log.
     var description: String { "<redacted>" }
 }
+
+typealias VerificationToken = JWTToken<EmailVerificationPayload>
+typealias AuthToken = JWTToken<AuthTokenPayload>
+typealias UserToken = JWTToken<UserTokenPayload>

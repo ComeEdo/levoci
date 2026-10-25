@@ -1,7 +1,7 @@
 import Vapor
 
 // MARK: - Registrazione
-struct RegisterRequest: Content {
+struct RegisterRequest: ValidatableRequest {
     let name: String
     let surname: String
     let username: String
@@ -17,21 +17,19 @@ struct RegisterRequest: Content {
         self.password = password
         self.classId = classId
     }
-}
+    
+    // MARK: - Validazione RegisterRequest
 
-// MARK: - Validazione RegisterRequest
-
-/// Dati di registrazione già sanificati e validati: è l'unico tipo che `register` può usare.
-struct ValidatedRegistration: Sendable {
-    let name: PersonName
-    let surname: PersonName
-    let username: Username
-    let email: SchoolEmail
-    let password: Password
-    let classId: UUID?
-}
-
-extension RegisterRequest: ValidatableRequest {
+    /// Dati di registrazione già sanificati e validati: è l'unico tipo che `register` può usare.
+    struct ValidatedRegistration: Sendable {
+        let name: PersonName
+        let surname: PersonName
+        let username: Username
+        let email: SchoolEmail
+        let password: Password
+        let classId: UUID?
+    }
+    
     /// Sanifica e valida tutti i campi. L'ordine dei controlli determina quale errore vede il client per primo.
     func validated() throws -> ValidatedRegistration {
         let validName = try PersonName(raw: name, field: .name)
@@ -67,20 +65,30 @@ struct EmailVerificationQuery: ValidatableRequest {
 }
 
 // MARK: - Login
-struct LoginRequestDTO: Content {
+struct LoginRequest: ValidatableRequest {
     let email: String
-    let password: String
+    private let password: String
+
+    init(email: String, password: String) {
+        self.email = email
+        self.password = password
+    }
+    
+    struct ValidatedLogin: Sendable {
+        let email: SchoolEmail
+        let password: LoginPassword
+    }
+    
+    func validated() throws -> ValidatedLogin {
+        let validEmail = try SchoolEmail(raw: email)
+        let validPassword = try LoginPassword(raw: password)
+        return ValidatedLogin(email: validEmail, password: validPassword)
+    }
 }
 
-struct LoginResponseDTO: Content {
-    let success: Bool
-    let message: String
-    let data: LoginData?
-    
-    struct LoginData: Content {
-        let roleGroups: [RoleGroupDTO]
-        let authToken: String
-    }
+struct LoginResponse: Content {
+    let authToken: String
+    let roleGroups: [RoleGroupDTO]
 }
 
 // MARK: - Verifica Username

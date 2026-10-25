@@ -1,63 +1,114 @@
 import Crypto
 import Vapor
 
-/// Password di registrazione già validata (policy applicata).
-/// Non viene mai modificata (niente trim né normalizzazione). Per il login NON usare questo tipo:
-/// al login non si applica la policy, così le password create con regole precedenti restano valide.
+// MARK: - Implementazione condivisa
+
+protocol PasswordHashable: Sendable {
+    func hash(into hasher: AsyncPasswordHasher) async throws -> PasswordHash
+    func hashed(on req: Request) async throws -> PasswordHash
+}
+
+fileprivate protocol PasswordInput: CustomStringConvertible, CustomDebugStringConvertible {
+    func prehashForHashing() -> String
+}
+
+extension PasswordInput {
+    var description: String { "<redacted>" }
+    var debugDescription: String { "<redacted>" }
+}
+
+fileprivate func computePasswordPrehash(_ text: String) -> String {
+    let digest = SHA256.hash(data: Data(text.utf8))
+    return Data(digest).base64EncodedString()
+}
+
+// MARK: - Password di Registrazione
+
+/// Password di registrazione già sanificata con `Sanitizer.text` (trim + Unicode NFC)
+/// e validata secondo le policy NIST (lunghezza min/max, assenza di caratteri di controllo).
 ///
-/// La password in chiaro è privata: l'unico modo di usarla è `hashed(on:)`, che restituisce un `PasswordHash`.
-struct Password: Sendable, CustomStringConvertible {
+/// La password in chiaro è privata: l'unico modo di usarla è `hashed(on:)` o `hash(into:)`, che restituisce un `PasswordHash`.
+struct Password: PasswordHashable, PasswordInput {
     /// Lunghezza minima: valore fisso, da cambiare qui quando serve (NIST SP 800-63B consiglia almeno 8).
-    static let minLength = 2
-    static let maxLength = 128
+    fileprivate static let minLength = 2
+    fileprivate static let maxLength = 128
 
     private let plaintext: String
 
     init(raw: String) throws {
+        let sanitized = Sanitizer.text(raw)
         let field = InputField.password
 
-        guard !raw.isEmpty else {
+        guard !sanitized.isEmpty else {
             throw APIError.badRequest("The \(field) is required")
         }
-        guard raw.count >= Self.minLength && raw.count <= Self.maxLength else {
+        guard sanitized.count >= Self.minLength && sanitized.count <= Self.maxLength else {
             throw APIError.badRequest("The \(field) must be between \(Self.minLength) and \(Self.maxLength) characters long")
         }
         // Rifiuta solo caratteri di controllo (tab, null, ecc.), nessuna altra restrizione sui caratteri
-        guard !raw.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+        guard !sanitized.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             throw APIError.badRequest("The \(field) contains invalid control characters")
         }
 
-        self.plaintext = raw
+        self.plaintext = sanitized
     }
 
-    /// Calcola il pre-hash SHA-256 della password in chiaro in Base64 (lunghezza fissa 44 caratteri, sempre < 72 byte).
-    /// Risolve il limite strutturale dei 72 byte di Bcrypt evitando troncamenti silenti su passphrase lunghe.
-    fileprivate static func prehash(_ plaintext: String) -> String {
-        let digest = SHA256.hash(data: Data(plaintext.utf8))
-        return Data(digest).base64EncodedString()
-    }
-
-    /// Hasha la password (pre-hash SHA-256 + Bcrypt) usando un'istanza di `AsyncPasswordHasher`.
     func hash(into hasher: AsyncPasswordHasher) async throws -> PasswordHash {
-        let prehashed = Self.prehash(plaintext)
-        return PasswordHash(value: try await hasher.hash(prehashed))
+        PasswordHash(value: try await hasher.hash(computePasswordPrehash(plaintext)))
     }
 
-    /// Hasha la password (pre-hash SHA-256 + Bcrypt con salt casuale) con l'hasher configurato nella Request.
     func hashed(on req: Request) async throws -> PasswordHash {
         try await hash(into: req.password.async)
     }
 
-    /// Evita che la password finisca per errore in log o stringhe interpolate.
-    var description: String { "<redacted>" }
+    fileprivate func prehashForHashing() -> String {
+        computePasswordPrehash(plaintext)
+    }
 }
+
+// MARK: - Password di Login
+
+/// Password ricevuta durante il login.
+/// Sanifica l'input con `Sanitizer.text` (trim + Unicode NFC) e applica la stessa policy
+/// di lunghezza della registrazione.
+struct LoginPassword: PasswordHashable, PasswordInput {
+    private let plaintext: String
+
+    init(raw: String) throws {
+        let sanitized = Sanitizer.text(raw)
+        let field = InputField.password
+
+        guard !sanitized.isEmpty else {
+            throw APIError.badRequest("The \(field) is required")
+        }
+        guard sanitized.count <= Password.maxLength else {
+            throw APIError.badRequest("The \(field) must be at most \(Password.maxLength) characters long")
+        }
+
+        self.plaintext = sanitized
+    }
+
+    func hash(into hasher: AsyncPasswordHasher) async throws -> PasswordHash {
+        PasswordHash(value: try await hasher.hash(computePasswordPrehash(plaintext)))
+    }
+
+    func hashed(on req: Request) async throws -> PasswordHash {
+        try await hash(into: req.password.async)
+    }
+
+    fileprivate func prehashForHashing() -> String {
+        computePasswordPrehash(plaintext)
+    }
+}
+
+// MARK: - PasswordHash
 
 /// Hash della password pronto per il DB (`Credentials.passwordHash`).
 ///
 /// ⚠️ Non è `Equatable` di proposito: bcrypt aggiunge un salt casuale, quindi due hash della stessa password
 /// sono DIVERSI e confrontarli con `==` non dice se la password coincide.
-/// Per controllare una password si verifica il testo in chiaro contro l'hash (`Bcrypt.verify`), non hash contro hash.
-struct PasswordHash: ValidatedField, Sendable {
+/// Per controllare una password si verifica un tipo validato contro l'hash (`Bcrypt.verify`), non hash contro hash.
+struct PasswordHash: ValidatedField, Sendable, CustomDebugStringConvertible {
     /// Stringa da salvare sul DB.
     let value: String
 
@@ -65,16 +116,26 @@ struct PasswordHash: ValidatedField, Sendable {
         self.value = value
     }
 
-    /// Verifica una password in chiaro contro questo hash (applica pre-hash SHA-256 e confronta con Bcrypt).
-    func verify(_ plaintext: String) throws -> Bool {
-        try Self.verify(plaintext, against: self.value)
+    /// Verifica una password contro una stringa hash memorizzata su DB in modo asincrono (senza bloccare l'EventLoop).
+    /// Verifica una password di registrazione già validata.
+    static func verify(_ password: Password, against storedHash: String, on req: Request) async throws -> Bool {
+        try await verifyPassword(password, against: storedHash, on: req)
     }
 
-    /// Verifica una password in chiaro contro una stringa hash memorizzata su DB (es. `Credentials.passwordHash`).
-    static func verify(_ plaintext: String, against storedHash: String) throws -> Bool {
-        let prehashed = Password.prehash(plaintext)
-        return try Bcrypt.verify(prehashed, created: storedHash)
+    /// Verifica una password di login già sanificata.
+    static func verify(_ password: LoginPassword, against storedHash: String, on req: Request) async throws -> Bool {
+        try await verifyPassword(password, against: storedHash, on: req)
     }
+
+    fileprivate static func verifyPassword(_ password: some PasswordInput, against storedHash: String, on req: Request) async throws -> Bool {
+        try await req.password.async.verify(password.prehashForHashing(), created: storedHash)
+    }
+
+    /// Evita che l'hash finisca per errore nei log standard o nelle stringhe interpolate.
+    var description: String { "<redacted>" }
+
+    /// Evita che l'hash venga ispezionato via debugPrint(), String(reflecting:) o debugger LLDB.
+    var debugDescription: String { "<redacted>" }
 }
 
 #if DEBUG

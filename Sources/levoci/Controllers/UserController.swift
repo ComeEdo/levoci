@@ -2,7 +2,7 @@ import Vapor
 
 /// Controller per la gestione del profilo utente e immagini avatar
 struct UserController: RouteCollection {
-    func boot(routes: RoutesBuilder) throws {
+    func boot(routes: any RoutesBuilder) throws {
         let userProtected = routes.grouped("user")
         
         userProtected.get("isUserTokenValid", use: isUserTokenValid)

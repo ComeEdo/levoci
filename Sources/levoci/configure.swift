@@ -79,12 +79,12 @@ enum ConfigurationError: Error, LocalizedError, Equatable {
     case missingKeyFile(name: String, path: String)
     case invalidKeyFile(name: String, reason: String)
 
-    var errorDescription: LocalizedStringResource {
+    var errorDescription: String? {
         switch self {
         case .missingEnvironmentVariable(let name):
             return "Variabile d'ambiente mancante o vuota nel file .env: \(name)"
         case .invalidEnvironmentVariable(let name, let value, let reason):
-            let base: LocalizedStringResource = "Valore non valido per la variabile d'ambiente \(name): '\(value)'"
+            let base = "Valore non valido per la variabile d'ambiente \(name): '\(value)'"
             if let reason {
                 return "\(base). \(reason)"
             } else {

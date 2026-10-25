@@ -22,6 +22,10 @@ final class Credentials: Model, @unchecked Sendable, Authenticatable {
     @Field(key: "isEmailVerified")
     private(set) var isEmailVerified: Bool
 
+    /// Timestamp dell'ultimo invio dell'email di verifica (controllo rate-limit 5 minuti).
+    @Field(key: "verificationEmailSentAt")
+    var verificationEmailSentAt: Date?
+
     @Timestamp(key: "dateOfCreation", on: .create)
     var dateOfCreation: Date?
 
@@ -39,6 +43,7 @@ final class Credentials: Model, @unchecked Sendable, Authenticatable {
         self.passwordHash = passwordHash.value
         self.tokenVersion = UUID()
         self.isEmailVerified = false
+        self.verificationEmailSentAt = nil
     }
 }
 
@@ -50,26 +55,31 @@ extension Credentials {
 
     /// Invia l'email di verifica con controllo di rate-limit (5 minuti) a livello di database e servizio email.
     func sendVerificationEmailIfNeeded(on db: any Database, emailService: any EmailServiceProtocol, logger: Logger? = nil) async throws {
-        try await self.$users.load(on: db)
-        let username = self.users.first?.username ?? self.email
+        guard !self.isEmailVerified else { return }
 
         let fiveMinutesAgo = Date().addingTimeInterval(-5 * 60)     // 5 minuti fa
-        let shouldSend = self.lastUpdated.map { $0 < fiveMinutesAgo } ?? true
+        let shouldSend = self.verificationEmailSentAt.map { $0 < fiveMinutesAgo } ?? true
 
-        if shouldSend {
-            self.lastUpdated = Date()
-            try await self.save(on: db)
+        guard shouldSend else { return }
 
-            let credId = try self.requireID()
-            let userEmail = self.email
-            let version = self.tokenVersion
+        // I profili servono solo per il nome nell'email: si caricano solo se si invia e solo se non sono già caricati
+        if self.$users.value == nil {
+            try await self.$users.load(on: db)
+        }
+        let username = self.users.first?.username ?? self.email
 
-            Task {
-                do {
-                    try await emailService.sendVerificationEmail(to: userEmail, credentialsId: credId, tokenVersion: version, username: username)
-                } catch {
-                    logger?.error("Impossibile inviare email di verifica per credentialsId \(credId): \(error)")
-                }
+        self.verificationEmailSentAt = Date()
+        try await self.save(on: db)
+
+        let credId = try self.requireID()
+        let userEmail = self.email
+        let version = self.tokenVersion
+
+        Task {
+            do {
+                try await emailService.sendVerificationEmail(to: userEmail, credentialsId: credId, tokenVersion: version, username: username)
+            } catch {
+                logger?.error("Impossibile inviare email di verifica per credentialsId \(credId): \(error)")
             }
         }
     }
@@ -85,6 +95,7 @@ extension Credentials {
     /// È l'unico punto che può impostare `isEmailVerified` a `true`.
     func markEmailAsVerified(on db: any Database) async throws {
         self.isEmailVerified = true
+        self.verificationEmailSentAt = nil
         try await self.save(on: db)
     }
 
@@ -99,6 +110,7 @@ extension Credentials {
     func updateEmail(to newEmail: some ValidatedEmail, on db: any Database) async throws {
         self.email = newEmail.value
         self.isEmailVerified = false
+        self.verificationEmailSentAt = nil
         try await self.invalidateAllSessions(on: db)
     }
 }

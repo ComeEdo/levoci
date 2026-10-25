@@ -1,6 +1,6 @@
 import Vapor
 import Fluent
-import FluentKit
+import JWT
 
 /// Controller per la gestione dell'autenticazione e delle credenziali
 struct AuthController: RouteCollection {
@@ -90,20 +90,7 @@ struct AuthController: RouteCollection {
         let userDir = URL(fileURLWithPath: req.application.directory.workingDirectory).appendingPathComponent("users").appendingPathComponent(userId.uuidString)
         try? FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
 
-        let credId = try credentials.requireID()
-        let userEmail = credentials.email
-        let tokenVersion = credentials.tokenVersion
-        let username = user.username
-        let emailService = req.emailService
-        let logger = req.logger
-
-        Task {
-            do {
-                try await emailService.sendVerificationEmail(to: userEmail, credentialsId: credId, tokenVersion: tokenVersion, username: username)
-            } catch {
-                logger.error("Impossibile inviare email di verifica a \(userId): \(error)")
-            }
-        }
+        try await credentials.sendVerificationEmailIfNeeded(req: req)
 
         req.logger.info("Registrazione completata con successo per userId: \(userId)")
 
@@ -126,8 +113,60 @@ struct AuthController: RouteCollection {
 
     @Sendable
     func login(req: Request) async throws -> Response {
-        // TODO: Implementare verifica credenziali e generazione AuthToken
-        throw Abort(.notImplemented)
+        let body = try req.validatedBody(LoginRequest.self)
+
+        // 1. Carichiamo solo le credenziali: include già passwordHash, isEmailVerified e tokenVersion.
+        let credentials = try await Credentials.query(on: req.db)
+            .filter(\.$email == body.email.value)
+            .first()
+
+        guard let credentials else {
+            throw APIError.unauthorized("Unauthorized - Email or password incorrect")
+        }
+
+        // 2. Verifica hash della password
+        let isPasswordValid: Bool
+        do {
+            isPasswordValid = try await PasswordHash.verify(body.password, against: credentials.passwordHash, on: req)
+        } catch let error as BcryptError {
+            // L'hash salvato non è un bcrypt valido (dati corrotti o inseriti a mano): per l'utente è un normale rifiuto,
+            // ma va segnalato nei log perché indica un problema sui dati
+            req.logger.error("Hash della password non valido per credentialsId \(credentials.id?.uuidString ?? "sconosciuto"): \(error)")
+            throw APIError.unauthorized("Unauthorized - Email or password incorrect")
+        }
+        guard isPasswordValid else {
+            throw APIError.unauthorized("Unauthorized - Email or password incorrect")
+        }
+
+        // 3. Verifica email: il flag isEmailVerified è già presente sul record credentials (nessuna query extra)
+        guard credentials.isEmailVerified else {
+            try await credentials.sendVerificationEmailIfNeeded(req: req)
+            throw APIError.forbidden("Email not verified, check your inbox")
+        }
+
+        let credId = try credentials.requireID()
+
+        // 4. Carichiamo i profili e le relazioni solo per un login autenticato e verificato
+        let users = try await User.query(on: req.db)
+            .filter(\.$credentials.$id == credId)
+            .with(\.$schoolClass) { $0.with(\.$studyField) }
+            .all()
+
+        let payload = AuthTokenPayload(credentialsId: credId, authTokenVersion: credentials.tokenVersion)
+        let authToken = try await req.jwt.sign(payload)
+
+        let userProfiles = try users.map { user in
+            try UserProfileDTO(from: user)
+        }
+
+        let roleGroups = Dictionary(grouping: userProfiles, by: { $0.roleId ?? 0 })
+            .map { RoleGroupDTO(roleId: $0.key, users: $0.value) }
+            .sorted { $0.roleId < $1.roleId }
+
+        req.logger.info("Login completato con successo per credentialsId: \(credId)")
+
+        let response = LoginResponse(authToken: authToken, roleGroups: roleGroups)
+        return try await response.encodeResponse(status: .ok, for: req)
     }
 
     @Sendable

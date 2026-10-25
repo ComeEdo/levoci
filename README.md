@@ -155,8 +155,7 @@ let body = try req.validatedBody(LoginRequestDTO.self)
 | `GET` | `/user/getTimetable` | `TimetableController` | `UserToken` | Orario scolastico per classe o docente corrente |
 | `GET` | `/user/post` | `PostController` | `UserToken` | Feed dei post con supporto delta-sync (`?lastSync=...`) |
 | `POST` | `/user/post` | `PostController` | `UserToken` | Creazione post con voto (per docente, materia o ora) |
-| `GET` | `/classes/info` | `ClassController` | Pubblico | Elenco classi attive dell'istituto |
-| `GET` | `/classes/registration` | `ClassController` | Pubblico | Classi aperte alla registrazione degli studenti |
+| `GET` | `/classes` | `ClassController` | Pubblico | Elenco classi attive dell'istituto (utilizzato anche per la registrazione) |
 
 ---
 

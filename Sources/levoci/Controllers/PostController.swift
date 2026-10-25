@@ -2,7 +2,7 @@ import Vapor
 
 /// Controller per la gestione dei post e delle recensioni (feed, voti, delta sync)
 struct PostController: RouteCollection {
-    func boot(routes: RoutesBuilder) throws {
+    func boot(routes: any RoutesBuilder) throws {
         let postRoutes = routes.grouped("user", "post")
         
         postRoutes.get(use: getPosts)

@@ -6,12 +6,12 @@ import JWT
 struct UserTokenMiddleware: AsyncMiddleware {
     func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
         guard let token = request.headers.bearerAuthorization?.token ?? request.headers.first(name: .authorization) else {
-            throw APIError.badRequest("Unauthorized - No token provided")
+            throw APIError.unauthorized("Unauthorized - No token provided")
         }
 
         let payload: UserTokenPayload
         do {
-            payload = try await request.jwt.verify(token)
+            payload = try await UserToken(raw: token).verify(on: request)
         } catch {
             throw APIError.unauthorized("Unauthorized - Token expired", userLogOut: true)
         }
@@ -24,7 +24,7 @@ struct UserTokenMiddleware: AsyncMiddleware {
         }
 
         guard let credentials = user.credentials, try credentials.requireID() == payload.credentialsId else {
-            throw APIError.forbidden("Forbidden - Invalid credentials", userLogOut: true)
+            throw APIError.unauthorized("Unauthorized - Invalid credentials", userLogOut: true)
         }
 
         guard credentials.tokenVersion == payload.tokenVersion else {
