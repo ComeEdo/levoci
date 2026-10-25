@@ -13,13 +13,15 @@ let package = Package(
         .package(url: "https://github.com/vapor/fluent.git", from: "4.13.0"),
         // 🐬 Fluent driver for MySQL.
         .package(url: "https://github.com/vapor/fluent-mysql-driver.git", from: "4.8.0"),
+        // 🐬 Fork mysql-nio con supporto per MariaDB nativo (UUID 36 char e TIME)
+        .package(url: "https://github.com/ComeEdo/mysql-nio.git", branch: "main"),
         // 🍃 An expressive, performant, and extensible templating language built for Swift.
         .package(url: "https://github.com/vapor/leaf.git", from: "4.5.1"),
         // 🔵 Non-blocking, event-driven networking for Swift. Used for custom executors
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.0"),
         // 📧 SMTP protocol support for the Vapor web framework.
         .package(url: "https://github.com/Mikroservices/Smtp.git", from: "3.0.0"),
-        // 🔐 JSON Web Token (JWT) support
+        // 🔑 JSON Web Token (JWT) support
         .package(url: "https://github.com/vapor/jwt.git", from: "5.0.0"),
     ],
     targets: [
@@ -28,6 +30,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Fluent", package: "fluent"),
                 .product(name: "FluentMySQLDriver", package: "fluent-mysql-driver"),
+                .product(name: "MySQLNIO", package: "mysql-nio"),
                 .product(name: "Leaf", package: "leaf"),
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "NIOCore", package: "swift-nio"),

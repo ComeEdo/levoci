@@ -169,16 +169,19 @@ La connessione al database MariaDB utilizza **autenticazione a certificati digit
 
 ---
 
-## 🐬 Compatibilità MariaDB: Patch `mysql-nio` (UUID e TIME)
+## 🐬 Compatibilità MariaDB: Fork di `mysql-nio` (UUID e TIME)
 
-Per garantire la piena interoperabilità con MariaDB e lo schema del database (`Database/schema.sql`), sono necessarie due piccole patch nella libreria di basso livello `vapor/mysql-nio` (`Sources/MySQLNIO/MySQLData.swift`):
+Per garantire la piena compatibilità con MariaDB e con lo schema del database (`Database/schema.sql`), il progetto include già direttamente in [`Package.swift`](file:///Users/mirkkone/Documents/VDC/levoci/Package.swift) il fork del driver:
+👉 **[`https://github.com/ComeEdo/mysql-nio.git`](https://github.com/ComeEdo/mysql-nio.git)** (branch `main`).
 
-### 1. Supporto al Tipo Nativo `UUID` (36 caratteri)
+Rispetto alla libreria originale `vapor/mysql-nio`, **cambiano esclusivamente due sole modifiche puntuali** all'interno del file `Sources/MySQLNIO/MySQLData.swift`:
+
+### 1. Supporto al Tipo Nativo `UUID` di MariaDB (36 caratteri)
 MariaDB (dalla versione 10.7 in poi) adotta il tipo di dato nativo **`UUID`**. Internamente MariaDB memorizza il valore a 128 bit (16 byte), ma attraverso il protocollo client binario lo restituisce formattato come stringa canonica da **36 caratteri** (es. `9107da00-bf8e-4472-a0e3-6ea452f43c96`).
 
-La libreria upstream `vapor/mysql-nio` di default accetta solo buffer binari rigidi da 16 byte (`buffer.readableBytes == 16`), generando a runtime l'errore `DecodingError.typeMismatch (Could not convert MySQL data to Optional<UUID>)`.
+La libreria upstream `vapor/mysql-nio` accetta solo buffer binari rigidi da 16 byte (`buffer.readableBytes == 16`), generando a runtime l'errore `DecodingError.typeMismatch (Could not convert MySQL data to Optional<UUID>)`.
 
-Nella proprietà `public var uuid: UUID?` (riga ~305), è stato aggiunto il supporto per buffer da 36 caratteri:
+Nel fork, all'interno della proprietà `public var uuid: UUID?` (riga ~305), viene semplicemente aggiunto il ramo per i 36 caratteri:
 ```swift
 public var uuid: UUID? {
     switch self.format {
@@ -205,9 +208,9 @@ public var uuid: UUID? {
 ```
 
 ### 2. Conversione del Tipo Nativo `TIME` in `String`
-Nella tabella dell'orario scolastico (`timetable`), i campi orari sono definiti con il tipo SQL `TIME`. MariaDB restituisce tali valori con il tag di tipo `.time`. Di default `mysql-nio` non gestisce il case `.time` all'interno della proprietà `public var string: String?`, restituendo `nil` e impedendo a Fluent di mappare l'orario in una stringa Swift.
+Nella tabella dell'orario scolastico (`timetable`), i campi orari sono definiti con il tipo SQL `TIME`. MariaDB restituisce tali valori con il tag di tipo `.time`. Upstream `mysql-nio` non gestisce il case `.time` all'interno della proprietà `public var string: String?`, restituendo `nil` e impedendo a Fluent di mappare l'orario in una stringa Swift `"HH:MM:SS"`.
 
-Nella proprietà `public var string: String?` (riga ~185), è stato aggiunto il case per il tipo `.time`:
+Nel fork, all'interno della proprietà `public var string: String?` (riga ~185), è stato aggiunto il case per il tipo `.time`:
 ```swift
 case .longlong, .long, .int24, .short, .tiny, .bit:
     return self.int?.description
@@ -219,8 +222,8 @@ default:
     return nil
 ```
 
-> [!NOTE]
-> Quando si clona ed esegue il progetto su un nuovo ambiente (es. nuovo Mac, server Linux o container Docker), assicurarsi che la checkout locale di `mysql-nio` contenga queste modifiche (oppure puntare a un fork dedicato in `Package.swift`), permettendo a tutte le query Fluent (`@ID`, relazioni, join e orari) di operare correttamente con MariaDB.
+> [!TIP]
+> Poiché il fork è già registrato come dipendenza in `Package.swift`, clonando il progetto su qualsiasi ambiente (nuovo Mac, Linux o container Docker) il driver viene scaricato e compilato automaticamente con queste due patch già attive, senza bisogno di alcun intervento manuale.
 
 ---
 
